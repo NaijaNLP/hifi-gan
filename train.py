@@ -5,6 +5,7 @@ import os
 import time
 import argparse
 import json
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
@@ -75,7 +76,7 @@ def train(rank, a, h):
 
     trainset = MelDataset(training_filelist, h.segment_size, h.n_fft, h.num_mels,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, n_cache_reuse=0,
-                          shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
+                          shuffle=False if h.num_gpus > 1 else True, split=True, fmax_loss=h.fmax_for_loss, device=device,
                           fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
@@ -88,7 +89,7 @@ def train(rank, a, h):
 
     if rank == 0:
         validset = MelDataset(validation_filelist, h.segment_size, h.n_fft, h.num_mels,
-                              h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
+                              h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, split=False, shuffle=False, n_cache_reuse=0,
                               fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
                               base_mels_path=a.input_mels_dir)
         validation_loader = DataLoader(validset, num_workers=1, shuffle=False,
@@ -124,6 +125,19 @@ def train(rank, a, h):
                                           h.fmin, h.fmax_for_loss)
 
             optim_d.zero_grad()
+            # print('filename', _)
+            # print('input spectrogram shape', x.shape)
+            # print('original audio shape', y.shape)
+            # print('generated audio shape', y_g_hat.shape)
+            # print('computed spectrogram shape', y_mel.shape)
+            # print('generated spectrogram shape', y_g_hat_mel.shape)
+
+            # np.save(f"Naija/debug_files/{_[0].split('/')[-1][:-4]}_input_spectrogram.npy", x.cpu().detach().numpy())
+            # np.save(f"Naija/debug_files/{_[0].split('/')[-1][:-4]}_original_audio.npy", y.cpu().detach().numpy())
+            # np.save(f"Naija/debug_files/{_[0].split('/')[-1][:-4]}_generated_audio.npy", y_g_hat.cpu().detach().numpy())
+            # np.save(f"Naija/debug_files/{_[0].split('/')[-1][:-4]}_computed_spectrogram.npy", y_mel.cpu().detach().numpy())
+            # np.save(f"Naija/debug_files/{_[0].split('/')[-1][:-4]}_generated_spectrogram.npy", y_g_hat_mel.cpu().detach().numpy())
+
 
             # MPD
             y_df_hat_r, y_df_hat_g, _, _ = mpd(y, y_g_hat.detach())
@@ -190,25 +204,35 @@ def train(rank, a, h):
                     val_err_tot = 0
                     with torch.no_grad():
                         for j, batch in enumerate(validation_loader):
-                            x, y, _, y_mel = batch
-                            y_g_hat = generator(x.to(device))
-                            y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
-                            y_g_hat_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate,
-                                                          h.hop_size, h.win_size,
-                                                          h.fmin, h.fmax_for_loss)
-                            val_err_tot += F.l1_loss(y_mel, y_g_hat_mel).item()
+                            try:
+                                x, y, _, y_mel = batch
+                                y_g_hat = generator(x.to(device))
+                                y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
+                                # print('og audio shape', _, y.shape)
+                                # print('gen audio shape', _, y_g_hat.shape)
+                                y_g_hat_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate,
+                                                            h.hop_size, h.win_size,
+                                                            h.fmin, h.fmax_for_loss)
+                                # print('og mel shape', _, y_mel.shape)
+                                # print('gen mel shape', _, y_g_hat_mel.shape)
+                                val_err_tot += F.l1_loss(y_mel, y_g_hat_mel[:,:,:y_mel.size(2)]).item()
+                                if j <= 4:
+                                    if steps == 0:
+                                        sw.add_audio('gt/y_{}'.format(j), y[0], steps, h.sampling_rate)
+                                        sw.add_figure('gt/y_spec_{}'.format(j), plot_spectrogram(x[0]), steps)
 
-                            if j <= 4:
-                                if steps == 0:
-                                    sw.add_audio('gt/y_{}'.format(j), y[0], steps, h.sampling_rate)
-                                    sw.add_figure('gt/y_spec_{}'.format(j), plot_spectrogram(x[0]), steps)
-
-                                sw.add_audio('generated/y_hat_{}'.format(j), y_g_hat[0], steps, h.sampling_rate)
-                                y_hat_spec = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels,
-                                                             h.sampling_rate, h.hop_size, h.win_size,
-                                                             h.fmin, h.fmax)
-                                sw.add_figure('generated/y_hat_spec_{}'.format(j),
-                                              plot_spectrogram(y_hat_spec.squeeze(0).cpu().numpy()), steps)
+                                    sw.add_audio('generated/y_hat_{}'.format(j), y_g_hat[0], steps, h.sampling_rate)
+                                    y_hat_spec = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels,
+                                                                h.sampling_rate, h.hop_size, h.win_size,
+                                                                h.fmin, h.fmax)
+                                    sw.add_figure('generated/y_hat_spec_{}'.format(j),
+                                                plot_spectrogram(y_hat_spec.squeeze(0).cpu().numpy()), steps)
+                            except RuntimeError as e:
+                                # print(e)
+                                # print(j)
+                                # print(batch[2])
+                                # print('Skipping the rest of validation set')
+                                continue
 
                         val_err = val_err_tot / (j+1)
                         sw.add_scalar("validation/mel_spec_error", val_err, steps)
@@ -230,17 +254,17 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--group_name', default=None)
-    parser.add_argument('--input_wavs_dir', default='LJSpeech-1.1/wavs')
-    parser.add_argument('--input_mels_dir', default='ft_dataset')
-    parser.add_argument('--input_training_file', default='LJSpeech-1.1/training.txt')
-    parser.add_argument('--input_validation_file', default='LJSpeech-1.1/validation.txt')
-    parser.add_argument('--checkpoint_path', default='cp_hifigan')
+    parser.add_argument('--input_wavs_dir', default='Naija/wavs')
+    parser.add_argument('--input_mels_dir', default='Naija/og_mel_specs')
+    parser.add_argument('--input_training_file', default='Naija/train_new.txt')
+    parser.add_argument('--input_validation_file', default='Naija/val_new.txt')
+    parser.add_argument('--checkpoint_path', default='checkpoints/UNIVERSAL_V1')
     parser.add_argument('--config', default='')
     parser.add_argument('--training_epochs', default=3100, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
     parser.add_argument('--checkpoint_interval', default=5000, type=int)
-    parser.add_argument('--summary_interval', default=100, type=int)
-    parser.add_argument('--validation_interval', default=1000, type=int)
+    parser.add_argument('--summary_interval', default=500, type=int)
+    parser.add_argument('--validation_interval', default=500, type=int)
     parser.add_argument('--fine_tuning', default=False, type=bool)
 
     a = parser.parse_args()

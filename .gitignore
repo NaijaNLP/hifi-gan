@@ -1,0 +1,4 @@
+*.npy
+*.wav
+*.txt
+checkpoints/
