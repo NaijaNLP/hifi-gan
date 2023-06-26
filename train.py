@@ -259,7 +259,7 @@ def main():
     parser.add_argument('--input_training_file', default='Naija/train_new.txt')
     parser.add_argument('--input_validation_file', default='Naija/val_new.txt')
     parser.add_argument('--checkpoint_path', default='checkpoints/')
-    parser.add_argument('--config', default='checkpoints/config.json')
+    parser.add_argument('--config', default='config.json')
     parser.add_argument('--training_epochs', default=3100, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
     parser.add_argument('--checkpoint_interval', default=1000, type=int)
